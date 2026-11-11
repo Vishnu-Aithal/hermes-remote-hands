@@ -211,8 +211,8 @@ plugin's page in Hermes Desktop (**Settings → Plugins**).
 
 - Server: `hermes plugins remove hermes-remote-hands`; delete the `Host` block, `~/.ssh/hermes_remote_hands*`, and
   `$HERMES_HOME/cache/ssh/`.
-- Mac: remove the key's line from `authorized_keys`; `tmux -L hermes kill-server`; `rm -rf ~/Library/Logs/hermes-dev`;
-  for cua-driver: `launchctl bootout gui/$(id -u)/com.trycua.cua-driver` and delete the plist.
+- Mac: remove the key's line from `authorized_keys`; `tmux -L hermes kill-server`; delete the `hermes-dev` folder
+  in `~/Library/Logs`; for cua-driver: `launchctl bootout gui/$(id -u)/com.trycua.cua-driver` and delete the plist.
 
 ## Disclosure
 
