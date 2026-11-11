@@ -205,7 +205,7 @@ plugin's page in Hermes Desktop (**Settings → Plugins**).
 | Captures are empty / "locked" | Unlock the Mac; screen control needs your user logged in at the console. |
 | `accessibility`/`screen_recording` false | Run `cua-driver permissions grant` **at the Mac**, then `launchctl kickstart -k gui/$(id -u)/com.trycua.cua-driver`. |
 | Every file op asks for approval | `python3` is missing on the Mac (`xcode-select --install`), or `projects_dir` points to a server path (quote the `~`). |
-| No `mac_*` tools | `ssh_host` / `home` not set or invalid (see `hermes logs`), or the gateway wasn't restarted. |
+| No `mac_*` tools | `ssh_host` / `home` not set or invalid (see `hermes logs`), or the gateway wasn't restarted. Also check `hermes tools list` shows `mac` enabled; if not, `hermes tools enable mac --platform cli` (another plugin with a `mac` toolset being disabled can remove it), then start a new chat. |
 
 ## Uninstall
 
