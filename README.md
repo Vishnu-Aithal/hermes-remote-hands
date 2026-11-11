@@ -79,6 +79,8 @@ server never grants it on the Mac.
 - **Bypass guard:** a `pre_tool_call` hook sends any *other* tool call that mentions the Mac (its SSH alias or IP,
   its key file, the SSH control socket, this plugin's settings or code) to a single-use approval, so
   `terminal: ssh <mac> …` can't route around these rules. It stays on even if the settings are missing or broken.
+  The prompt says which it was: reaching the Mac, or touching the plugin's own files on the server (editing
+  them could weaken the guard). Each prompt covers one call, even if you answer "session" or "always".
 - Unattended runs (cron, no human attached) fail closed.
 
 ## Requirements

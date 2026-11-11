@@ -868,12 +868,16 @@ def _identity_files(host: str) -> tuple[str, ...]:
 
 
 # Always guarded, even if the settings are missing or broken: the control socket (`ssh -S <socket> anyhost cmd`
-# rides an open connection without naming host or key) and this plugin's own config / code.
-_STATIC_MARKERS = ("cm-hermes", "entries.hermes-remote-hands", "plugins/hermes-remote-hands")
+# rides an open connection without naming host or key) and this plugin's own config / code. The two groups get
+# different approval messages: touching the plugin's files is a local action that could weaken this guard, not a
+# connection to the Mac.
+_STATIC_MAC_MARKERS = ("cm-hermes",)
+_SELF_MARKERS = ("entries.hermes-remote-hands", "plugins/hermes-remote-hands")
+_ONE_TIME = " One-time approval: answering 'session' or 'always' still covers only this call."
 
 
 def _mac_markers() -> tuple[str, ...]:
-    marks: set[str] = set(_STATIC_MARKERS)
+    marks: set[str] = set(_STATIC_MAC_MARKERS)
     try:
         n = _node()
         hostname, _ = _ssh_target(n["ssh_host"])
@@ -902,12 +906,20 @@ def _pre_tool_call(tool_name: str = "", args: Any = None, **_kw) -> Optional[dic
         hit = next((m for m in _mac_markers() if _mentions(m, blob) or _mentions(m, flat)), None)
         if hit is None and re.search(r"\bssh\b.*(\s-s(\s|[~/$])|controlpath)", flat):
             hit = "ssh control socket"
-        if hit is None:
-            return None
+        if hit is not None:  # reaching the Mac wins over a self-marker in the same call
+            message = (f"`{tool_name}` is reaching the user's Mac directly (matched '{hit}'), "
+                       "outside the mac_* tools.")
+        else:
+            hit = next((m for m in _SELF_MARKERS if _mentions(m, blob) or _mentions(m, flat)), None)
+            if hit is None:
+                return None
+            # Not "doesn't reach the Mac": running the plugin's own code from a shell could still connect.
+            message = (f"`{tool_name}` touches the hermes-remote-hands plugin's own code or settings on this "
+                       f"server (matched '{hit}'); editing them could weaken the Mac guard. No Mac address "
+                       "appears in the call itself.")
         # Single-use key: one 'session' answer must not open the Mac to every later terminal call.
         return {"action": "approve", "rule_key": f"mac_direct:{tool_name}:{os.urandom(6).hex()}",
-                "message": f"`{tool_name}` is reaching the user's Mac directly (matched '{hit}'), "
-                           "outside the mac_* tools"}
+                "message": message + _ONE_TIME}
     except Exception:
         return None
 

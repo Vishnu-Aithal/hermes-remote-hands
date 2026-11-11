@@ -119,6 +119,20 @@ def test_bypass_guard_survives_broken_settings():
     assert _hook("ssh macbook id") is not None
 
 
+def test_bypass_guard_messages():
+    configure(**GOOD)
+    mac = _hook("ssh macbook id")["message"]
+    assert "reaching the user's Mac" in mac and "One-time approval" in mac, mac
+    for cmd in ("git -C ~/.hermes/plugins/hermes-remote-hands rev-parse HEAD",
+                "hermes config set plugins.entries.hermes-remote-hands.settings.name Mac"):
+        own = _hook(cmd)["message"]
+        assert "plugin's own code or settings" in own and "reaching" not in own and "One-time" in own, own
+    both = _hook("scp ~/.hermes/plugins/hermes-remote-hands/x.py macbook:/tmp/")["message"]
+    assert "reaching the user's Mac" in both, both  # the Mac message wins when both match
+    own = m._pre_tool_call("search_files", {"pattern": "entries\\.hermes-remote-hands", "path": "."})
+    assert own is not None and "own code or settings" in own["message"], own
+
+
 def test_ssh_argv_has_end_of_options():
     configure(**GOOD)
     seen = {}

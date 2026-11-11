@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.1 — 2026-11-11
+- Bypass-guard prompts say what matched: a call that only touches this plugin's own code or settings on the
+  server no longer claims it is "reaching the user's Mac". Every prompt now states it is a one-time approval
+  (a 'session' or 'always' answer covers only that call).
+
 ## 0.5.0 — 2026-11-11
 - Settings are type-checked and normalised (`ssh_host` charset, absolute `home`, `write_roots` list or comma text,
   `shell_grants` choices); the legacy `remote_hands.json` fallback is gone.
