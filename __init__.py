@@ -1,16 +1,11 @@
-"""hermes-remote-hands: one Hermes brain on a server, hands on the user's own Mac over (Tailscale) SSH.
+"""hermes-remote-hands: one Hermes brain on a server, hands on the user's own Mac over OpenSSH (e.g. on a tailnet).
 
-No agent and no memory run on the Mac. Tools: mac_computer_use (screen, via cua-driver), mac_shell, mac_file,
-mac_patch, mac_search, mac_process. See README.md.
-
-Original module notes (mac_shell / mac_file):
-
-Two small tools so fast models don't have to remember ssh syntax or quoting:
-  mac_shell(command, timeout?)                              -> {exit_code, stdout, stderr}
-  mac_file(action=read|write|list, path, content?, append?) -> file text / ok / listing
-Every call passes Hermes's approval gate. A pre_tool_call hook also routes any OTHER tool call that
-reaches for the Mac directly (e.g. `terminal: ssh macbook …`, reading the SSH key) through approval, so
-the Mac can't be reached around these tools without the user seeing it.
+No agent, memory or model runs on the Mac. Tools: mac_computer_use (screen, via cua-driver; see mac_cu.py),
+mac_shell, mac_file, mac_patch, mac_search, mac_process — small, explicit tools so fast models never have to
+remember ssh syntax or quoting. Every call passes Hermes's approval gate. A pre_tool_call hook also routes any
+OTHER tool call that reaches for the Mac directly (e.g. `terminal: ssh <mac> …`, its key file, the control
+socket, this plugin's settings) through a single-use approval, so the Mac can't be reached around these tools
+without the user seeing it. See README.md.
 """
 
 from __future__ import annotations
@@ -34,9 +29,18 @@ logger = logging.getLogger("plugins.hermes_remote_hands")
 
 # ControlMaster: reuse one connection across calls (~0.55 s handshake -> ~0.05 s). ControlPersist is short so a
 # master left over from before the Mac slept doesn't linger; ServerAlive kills a dead one in ~30 s.
-_SSH_OPTS = ["-T", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=8",
-             "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=3",
-             "-o", "ControlMaster=auto", "-o", "ControlPath=~/.ssh/cm-hermes-%C", "-o", "ControlPersist=30"]
+_SSH_BASE = ["-T", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=8",
+             "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=3"]
+
+
+def _ssh_opts() -> list[str]:
+    """ssh options, with the ControlMaster socket in a private dir under $HERMES_HOME (``cm-hermes-<hash>``)."""
+    cdir = _hermes_home() / "cache" / "ssh"
+    with contextlib.suppress(OSError):
+        cdir.mkdir(parents=True, exist_ok=True)
+        os.chmod(cdir, 0o700)
+    return [*_SSH_BASE, "-o", "ControlMaster=auto", "-o", f"ControlPath={cdir}/cm-hermes-%C",
+            "-o", "ControlPersist=30"]
 _MAX_OUT = 50_000          # chars of stdout/stderr returned to the model
 _MAX_READ = 200_000        # bytes for mac_file read
 _MAX_WRITE = 5_000_000     # bytes for mac_file write
@@ -53,35 +57,80 @@ def _hermes_home() -> Path:
 
 
 _CTX = None  # the PluginContext, set in register(); settings are read through ctx.get_config at call time
-_SETTING_KEYS = ("name", "ssh_host", "home", "driver", "projects_dir", "write_roots", "shell_grants")
+_DEFAULTS: dict[str, Any] = {"name": "Mac", "ssh_host": "", "home": "", "driver": "~/.local/bin/cua-driver",
+                             "projects_dir": "", "write_roots": [], "shell_grants": "per_command"}
+_HOST_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._@%+:-]*")
+_warned: set[str] = set()
+
+
+class NotConfigured(ValueError):
+    """The plugin's settings are missing or invalid; the message tells the user what to set."""
+
+
+def _warn_once(msg: str) -> None:
+    if msg not in _warned:
+        _warned.add(msg)
+        logger.warning("hermes-remote-hands: %s", msg)
+
+
+def _clean(cfg: dict[str, Any]) -> dict[str, Any]:
+    """Type-check and normalise settings (config values are user-editable text: never trust their shape)."""
+    out = dict(_DEFAULTS)
+    for k in ("name", "ssh_host", "home", "driver", "projects_dir", "shell_grants"):
+        v = cfg.get(k)
+        if v is None or v == "":
+            continue
+        if not isinstance(v, (str, int, float)) or isinstance(v, bool):
+            raise NotConfigured(f"setting {k!r} must be text, got {type(v).__name__}")
+        out[k] = str(v).strip()
+    roots = cfg.get("write_roots") or []
+    if isinstance(roots, str):  # `hermes config set ... write_roots "~/a, ~/b"` stores text
+        roots = re.split(r"[,\n]", roots)
+    if not isinstance(roots, (list, tuple)):
+        raise NotConfigured("setting 'write_roots' must be a list of folders")
+    out["write_roots"] = [str(r).strip() for r in roots if isinstance(r, str) and str(r).strip()]
+    host = out["ssh_host"]
+    if not host:
+        raise NotConfigured("hermes-remote-hands is not configured: set the ssh_host setting (your Mac's SSH "
+                            "alias) and home — see the plugin README")
+    if not _HOST_RE.fullmatch(host):
+        raise NotConfigured(f"invalid ssh_host {host!r}")  # never let config smuggle ssh options
+    if out["home"]:
+        home = posixpath.normpath(out["home"])
+        if not home.startswith("/") or home == "/":
+            raise NotConfigured("the 'home' setting must be an absolute folder, e.g. /Users/you")
+        out["home"] = home
+    if out["shell_grants"] not in ("per_command", "per_session"):
+        _warn_once(f"unknown shell_grants {out['shell_grants']!r}; using per_command")
+        out["shell_grants"] = "per_command"
+    for k in ("projects_dir", *out["write_roots"]):
+        v = out.get(k, k)
+        if v.startswith(str(Path.home()) + "/") and not (out["home"] and v.startswith(out["home"] + "/")):
+            _warn_once(f"{v!r} looks like a path on THIS server, not the Mac (quote '~' in `hermes config set`)")
+    return out
 
 
 def _node() -> dict[str, Any]:
-    """Node settings: ``plugins.entries.hermes-remote-hands.settings`` (see plugin.yaml ``config_schema``), over the
-    legacy ``$HERMES_HOME/remote_hands.json`` if present, over defaults.
+    """Node settings: ``plugins.entries.hermes-remote-hands.settings`` (plugin.yaml ``config_schema``) over defaults.
 
     ``shell_grants``: ``per_command`` (default — a grant covers only that exact command) or ``per_session`` (one
     grant = an unrestricted Mac shell for the conversation: the sensitive-command regex is a keyword list that
     quoting/globbing defeats, so treat it as a hint, not a boundary). ``projects_dir`` and optional ``write_roots``
-    (list) are the only folders session-level file grants reach."""
-    cfg: dict[str, Any] = {"name": "Mac", "ssh_host": "", "home": "", "driver": "~/.local/bin/cua-driver",
-                           "projects_dir": "", "write_roots": [], "shell_grants": "per_command"}
-    with contextlib.suppress(Exception):
-        legacy = json.loads((_hermes_home() / "remote_hands.json").read_text(encoding="utf-8"))
-        cfg.update({k: v for k, v in legacy.items() if k in _SETTING_KEYS and v not in (None, "")})
+    are the only folders session-level file grants reach."""
+    raw: dict[str, Any] = {}
     if _CTX is not None:
-        for k in _SETTING_KEYS:
+        for k in _DEFAULTS:
             with contextlib.suppress(Exception):
-                v = _CTX.get_config(k, default=None)
-                if v not in (None, "", []):
-                    cfg[k] = v
-    host = str(cfg.get("ssh_host") or "")
-    if not host:
-        raise ValueError("hermes-remote-hands is not configured: set ssh_host (an alias from ~/.ssh/config) — "
-                         "see the plugin README")
-    if host.startswith("-") or any(c.isspace() for c in host):
-        raise ValueError(f"invalid ssh_host {host!r}")  # never let config smuggle ssh options
-    return cfg
+                raw[k] = _CTX.get_config(k, default=None)
+    return _clean(raw)
+
+
+def _configured() -> bool:
+    try:
+        _node()
+        return True
+    except Exception:
+        return False
 
 
 _target_cache: dict[tuple[str, float], tuple[str, int]] = {}
@@ -101,13 +150,14 @@ def _ssh_target(host: str) -> tuple[str, int]:
     key = (host, _ssh_config_mtime())
     if key in _target_cache:
         return _target_cache[key]
-    hostname, port = host, 22
+    hostname, port, ok = host, 22, False
     with contextlib.suppress(Exception):
-        out = subprocess.run(["ssh", "-G", host], capture_output=True, text=True, timeout=5,
+        out = subprocess.run(["ssh", "-G", "--", host], capture_output=True, text=True, timeout=5,
                              stdin=subprocess.DEVNULL).stdout
         kv = dict(line.split(" ", 1) for line in out.splitlines() if " " in line)
-        hostname, port = kv.get("hostname", host), int(kv.get("port", "22"))
-    _target_cache[key] = (hostname, port)
+        hostname, port, ok = kv.get("hostname", host), int(kv.get("port", "22")), "hostname" in kv
+    if ok:  # never cache a failed lookup (it would hide the real IP from the bypass guard)
+        _target_cache[key] = (hostname, port)
     return hostname, port
 
 
@@ -163,7 +213,7 @@ def _ssh_raw(remote_cmd: str, *, timeout: int, stdin: Optional[bytes] = None) ->
     q = _q(f"printf '%s\\n' {sentinel}\n{remote_cmd}")
     wrapped = (f"if [ -x /usr/bin/perl ]; then exec /usr/bin/perl -e {_REAPER} {t} /bin/zsh -lc {q}; "
                f"else exec /bin/zsh -lc {q}; fi")
-    p = subprocess.run(["ssh", *_SSH_OPTS, _node()["ssh_host"], wrapped], input=stdin if stdin is not None else b"",
+    p = subprocess.run(["ssh", *_ssh_opts(), "--", _node()["ssh_host"], wrapped], input=stdin if stdin is not None else b"",
                        capture_output=True, timeout=t + 15, env=_env())
     code, err = p.returncode, p.stderr.decode("utf-8", "replace")
     if code == 142 and "__HERMES_TIMEOUT__" in err:  # the remote alarm fired (a command may itself exit 142)
@@ -185,9 +235,9 @@ def _clip(s: str) -> str:
 
 
 def _home() -> str:
-    home = (_node().get("home") or "").rstrip("/")
+    home = _node().get("home") or ""  # normalised by _clean()
     if not home.startswith("/"):
-        raise ValueError("hermes-remote-hands needs an absolute 'home' setting (e.g. /Users/you)")
+        raise NotConfigured("hermes-remote-hands needs the absolute 'home' setting (e.g. /Users/you)")
     return home
 
 
@@ -254,23 +304,33 @@ def _resolve(shown: str) -> str:
     return ""
 
 
-_roots_cache: dict[tuple, tuple[str, ...]] = {}
+_roots_cache: dict[tuple, tuple[str, ...]] = {}  # (home, raw roots) -> resolved roots
 
 
 def _roots() -> tuple[str, ...]:
     """Resolved project roots (projects_dir + optional write_roots): the only places a session grant reaches."""
     node = _node()
+    home = _home()
     raw = tuple(str(r) for r in [node.get("projects_dir"), *(node.get("write_roots") or [])] if r)
-    if raw not in _roots_cache:
-        res = []
+    key = (home, raw)
+    if key not in _roots_cache:
+        res, complete = [], True
         for r in raw:
-            with contextlib.suppress(Exception):
-                if (real := _resolve(_expand(r))) and real != "/" and real != _home():
-                    res.append(real)
-        if res or not raw:
-            _roots_cache[raw] = tuple(res)
-        return tuple(res)
-    return _roots_cache[raw]
+            try:
+                real = _resolve(_expand(r))
+            except Exception:
+                complete = False  # transient (e.g. SSH hiccup): don't cache, retry next call
+                continue
+            # A root must be strictly inside home's subfolders, never home itself or one of its ancestors
+            # (['~'], ['/Users'], ['~/..'] would turn a session grant into a grant on the whole home).
+            if not real or real.count("/") < 2 or real == home or home.startswith(real.rstrip("/") + "/"):
+                _warn_once(f"ignoring project folder {r!r}: too broad (must be a folder inside home)")
+                continue
+            res.append(real)
+        if not complete:
+            return tuple(res)
+        _roots_cache[key] = tuple(res)
+    return _roots_cache[key]
 
 
 def _inside(real: str, roots: tuple[str, ...]) -> bool:
@@ -389,6 +449,8 @@ def mac_shell(params: dict, **_kw) -> str:
         if code == 255 and not out:
             return json.dumps({"error": f"ssh failed: {errout.strip()[:500]}", "command": command})
         return json.dumps({"exit_code": code, "stdout": _clip(out), "stderr": _clip(errout)})
+    except NotConfigured as e:
+        return json.dumps({"error": str(e)})
     except Exception as e:
         logger.exception("mac_shell failed")
         return json.dumps({"error": f"mac_shell failed: {e}"})
@@ -441,6 +503,8 @@ def mac_file(params: dict, **_kw) -> str:
                           else {"error": errout.strip() or "write failed", "path": shown})
     except subprocess.TimeoutExpired:
         return json.dumps({"error": "timed out talking to the Mac"})
+    except NotConfigured as e:
+        return json.dumps({"error": str(e)})
     except Exception as e:
         logger.exception("mac_file failed")
         return json.dumps({"error": f"mac_file failed: {e}"})
@@ -609,6 +673,8 @@ def mac_patch(params: dict, **_kw) -> str:
         return json.dumps(resp)
     except subprocess.TimeoutExpired:
         return json.dumps({"error": "timed out talking to the Mac"})
+    except NotConfigured as e:
+        return json.dumps({"error": str(e)})
     except Exception as e:
         logger.exception("mac_patch failed")
         return json.dumps({"error": f"mac_patch failed: {e}"})
@@ -669,6 +735,8 @@ def mac_search(params: dict, **_kw) -> str:
         return json.dumps(resp)
     except subprocess.TimeoutExpired:
         return json.dumps({"error": "search timed out; narrow the path or pattern"})
+    except NotConfigured as e:
+        return json.dumps({"error": str(e)})
     except Exception as e:
         logger.exception("mac_search failed")
         return json.dumps({"error": f"mac_search failed: {e}"})
@@ -761,6 +829,8 @@ def mac_process(params: dict, **_kw) -> str:
                                    f"`tmux -L hermes attach -t {sess}` to watch"})
     except subprocess.TimeoutExpired:
         return json.dumps({"error": "timed out talking to the Mac"})
+    except NotConfigured as e:
+        return json.dumps({"error": str(e)})
     except Exception as e:
         logger.exception("mac_process failed")
         return json.dumps({"error": f"mac_process failed: {e}"})
@@ -781,44 +851,63 @@ def _identity_files(host: str) -> tuple[str, ...]:
     key = (host, _ssh_config_mtime())
     if key not in _key_cache:
         names: set[str] = set()
+        ok = False
         with contextlib.suppress(Exception):
-            out = subprocess.run(["ssh", "-G", host], capture_output=True, text=True, timeout=5,
+            out = subprocess.run(["ssh", "-G", "--", host], capture_output=True, text=True, timeout=5,
                                  stdin=subprocess.DEVNULL).stdout
             for line in out.splitlines():
+                ok = ok or line.startswith("hostname ")
                 if line.startswith("identityfile "):
                     base = posixpath.basename(line.split(" ", 1)[1].strip())
-                    if base and not base.startswith("id_"):  # default keys are too generic to match on
+                    if len(base) >= 4 and not base.startswith("id_"):  # default keys are too generic
                         names.add(base)
+        if not ok:
+            return tuple(sorted(names))
         _key_cache[key] = tuple(sorted(names))
     return _key_cache[key]
 
 
+# Always guarded, even if the settings are missing or broken: the control socket (`ssh -S <socket> anyhost cmd`
+# rides an open connection without naming host or key) and this plugin's own config / code.
+_STATIC_MARKERS = ("cm-hermes", "entries.hermes-remote-hands", "plugins/hermes-remote-hands")
+
+
 def _mac_markers() -> tuple[str, ...]:
-    n = _node()
-    hostname, _ = _ssh_target(n["ssh_host"])
-    # cm-hermes: the ControlMaster socket — `ssh -S <socket> anyhost cmd` rides it without naming host or key.
-    marks = {n["ssh_host"], hostname, "remote_hands.json", "cm-hermes", "hermes-remote-hands",
-             *_identity_files(n["ssh_host"])}
-    return tuple(m.lower() for m in marks if m)
+    marks: set[str] = set(_STATIC_MARKERS)
+    try:
+        n = _node()
+        hostname, _ = _ssh_target(n["ssh_host"])
+        marks |= {n["ssh_host"], hostname, *_identity_files(n["ssh_host"])}
+    except Exception:  # broken settings must not switch the guard off: fall back to the raw alias
+        with contextlib.suppress(Exception):
+            raw = str(_CTX.get_config("ssh_host", default="") or "").strip() if _CTX is not None else ""
+            if raw:
+                marks.add(raw)
+    return tuple(sorted(m.lower() for m in marks if m and len(m) >= 2))
+
+
+def _mentions(marker: str, text: str) -> bool:
+    """Token match: 'macbook' hits `ssh macbook`, `user@macbook:` and `~/.ssh/macbook_key`, not 'umbrella'."""
+    return re.search(r"(?<![a-z0-9])" + re.escape(marker) + r"(?![a-z0-9])", text) is not None
 
 
 def _pre_tool_call(tool_name: str = "", args: Any = None, **_kw) -> Optional[dict]:
-    """Any non-Mac tool whose arguments mention the Mac (its SSH alias/IP, its key, the node config) is
-    escalated to the human gate. Exceptions return None — this hook must never block unrelated tools."""
+    """Any non-Mac tool whose arguments mention the Mac (its SSH alias/IP, its key, the control socket, this
+    plugin's settings) is escalated to a single-use human approval. Never raises: it must not break other tools."""
     try:
         if tool_name in _OWN_TOOLS or not args:
             return None
         blob = json.dumps(args, default=str).lower()
         flat = re.sub(r"[\\'\"`]|\$\{?\w*\}?", "", blob)  # mac''book, mac\\book, mac${x}book -> macbook
-        hit = next((m for m in _mac_markers() if m in blob or m in flat), None)
-        if hit is None and re.search(r"\bssh\b.*(\s-s\s|controlpath|\.ssh/cm)", flat):
+        hit = next((m for m in _mac_markers() if _mentions(m, blob) or _mentions(m, flat)), None)
+        if hit is None and re.search(r"\bssh\b.*(\s-s(\s|[~/$])|controlpath)", flat):
             hit = "ssh control socket"
         if hit is None:
             return None
         # Single-use key: one 'session' answer must not open the Mac to every later terminal call.
         return {"action": "approve", "rule_key": f"mac_direct:{tool_name}:{os.urandom(6).hex()}",
                 "message": f"`{tool_name}` is reaching the user's Mac directly (matched '{hit}'), "
-                           "outside the mac_* tools / computer_use"}
+                           "outside the mac_* tools"}
     except Exception:
         return None
 
@@ -830,14 +919,18 @@ def register(ctx):
     _CTX = ctx
     try:
         node = _node()
-    except ValueError as e:  # not configured yet: still register, every call returns the setup hint
+        if len(node["ssh_host"]) < 4:
+            logger.warning("hermes-remote-hands: ssh_host %r is short; other tools' calls that mention it (e.g. "
+                           "inside longer words) will ask for approval — a distinctive alias is better",
+                           node["ssh_host"])
+    except ValueError as e:  # not configured yet: tools stay hidden (check_fn) until settings are valid
         logger.warning("hermes-remote-hands: %s", e)
         node = {"name": "Mac", "projects_dir": ""}
     name = node["name"]
-    # Tools are always listed (no reachability check_fn): a stable tool list keeps the prompt cache intact
-    # when the Mac sleeps, and an offline Mac returns a clear "asleep / off Tailscale" error at call time.
+    # check_fn is config-only (no network): the tool list stays stable when the Mac sleeps, so the prompt cache
+    # survives, and an offline Mac returns a clear "asleep / off the network" error at call time.
     ctx.register_tool(
-        name="mac_shell", toolset="mac", handler=mac_shell, emoji="🍎",
+        check_fn=_configured, name="mac_shell", toolset="mac", handler=mac_shell, emoji="🍎",
         schema={
             "name": "mac_shell",
             "description": (f"Run a shell command on the user's {name} (macOS, zsh login shell, over SSH). "
@@ -852,7 +945,7 @@ def register(ctx):
             }, "required": ["command"]},
         })
     ctx.register_tool(
-        name="mac_file", toolset="mac", handler=mac_file, emoji="🍎",
+        check_fn=_configured, name="mac_file", toolset="mac", handler=mac_file, emoji="🍎",
         schema={
             "name": "mac_file",
             "description": (f"Read, write or list text files on the user's {name}. Paths may start with ~. "
@@ -869,7 +962,7 @@ def register(ctx):
         })
     projects = node.get("projects_dir") or "~"
     ctx.register_tool(
-        name="mac_patch", toolset="mac", handler=mac_patch, emoji="🍎",
+        check_fn=_configured, name="mac_patch", toolset="mac", handler=mac_patch, emoji="🍎",
         schema={
             "name": "mac_patch",
             "description": (f"Edit a text file on the user's {name} by exact find-and-replace (like patch, for the "
@@ -884,7 +977,7 @@ def register(ctx):
             }, "required": ["path", "old_string", "new_string"]},
         })
     ctx.register_tool(
-        name="mac_search", toolset="mac", handler=mac_search, emoji="🍎",
+        check_fn=_configured, name="mac_search", toolset="mac", handler=mac_search, emoji="🍎",
         schema={
             "name": "mac_search",
             "description": (f"Search files on the user's {name} with ripgrep (respects .gitignore). "
@@ -904,7 +997,7 @@ def register(ctx):
             }, "required": ["pattern"]},
         })
     ctx.register_tool(
-        name="mac_process", toolset="mac", handler=mac_process, emoji="🍎",
+        check_fn=_configured, name="mac_process", toolset="mac", handler=mac_process, emoji="🍎",
         schema={
             "name": "mac_process",
             "description": (f"Long-running jobs on the user's {name} (dev servers, watchers, long builds/tests) in "
@@ -931,7 +1024,9 @@ def register(ctx):
     _spec.loader.exec_module(mac_cu)
     mac_cu.configure(settings_fn=_node)
     ctx.register_tool(name="mac_computer_use", toolset="mac", handler=mac_cu.make_handler(_hermes_home),
-                      schema=mac_cu.schema(), emoji="🍎")
+                      schema=mac_cu.schema(name), emoji="🍎", check_fn=_configured)
+    with contextlib.suppress(Exception):  # disable / reload: close this load's SSH sessions to the Mac
+        ctx.on_unload(mac_cu._release_all)
     ctx.register_hook("on_session_finalize", mac_cu.release)
     ctx.register_hook("on_session_reset", mac_cu.release)
     ctx.register_hook("post_compaction", mac_cu.on_compaction)

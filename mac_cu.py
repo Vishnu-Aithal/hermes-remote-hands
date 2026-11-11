@@ -28,7 +28,7 @@ import threading
 from pathlib import Path
 from typing import Any, Optional
 
-logger = logging.getLogger("plugins.mac_shell.mac_cu")
+logger = logging.getLogger("plugins.hermes_remote_hands.mac_cu")
 
 _lock = threading.Lock()
 _backends: dict[str, Any] = {}
@@ -199,11 +199,16 @@ def _shell_grants(hermes_home: Path) -> str:
     return "per_command"
 
 
+# Input actions whose grant is keyed by the exact text they send (a per-action grant would let one approved
+# keystroke into a focused Terminal become an open shell).
+_PER_TEXT = {"type": "text", "key": "keys", "set_value": "value"}
+
+
 def _approval(action: str, scope: str, args: dict[str, Any], summary: str, grants: str) -> tuple[str, str]:
     """(rule_key, description) for one approval scope."""
     mode = "foreground" if args.get("delivery_mode") == "foreground" else "background"
-    if scope in ("type", "key") and grants != "per_session":
-        payload = str(args.get("text") if scope == "type" else args.get("keys") or "")
+    if scope in _PER_TEXT and grants != "per_session":
+        payload = str(args.get(_PER_TEXT[scope]) or "")
         digest = hashlib.sha256(payload.encode("utf-8", "replace")).hexdigest()[:12]
         shown = json.dumps(payload[:2000]) + (" …(truncated)" if len(payload) > 2000 else "")
         return f"mac_cua:{scope}:{mode}:{digest}", f"On the user's Mac: {scope} {shown} ({mode})"
@@ -231,14 +236,18 @@ def make_handler(hermes_home_fn):
         action = (args.get("action") or "").strip().lower()
         if not action:
             return json.dumps({"error": "missing `action`"})
+        home = hermes_home_fn()
+        try:  # settings first: an unconfigured plugin must not ask the user to approve anything
+            _remote_mac_module(home).node_config()
+        except Exception as e:
+            return json.dumps({"error": f"Mac computer use unavailable: {e}"})
         if (err := T._reject_unsafe(action, args)) is not None:
             return err
-        home = hermes_home_fn()
         scopes = (["observe"] if action in _OBSERVE else []) + (
             [action] if action in T._ACTIONS and T._ACTIONS[action].destructive else []) + (
             ["bring_to_front"] if args.get("bring_to_front") or (action == "focus_app" and args.get("raise_window"))
             else [])
-        grants = _shell_grants(home) if action in ("type", "key") else ""
+        grants = _shell_grants(home) if action in _PER_TEXT else ""
         for scope in scopes:
             summary = "look at the screen (capture / list apps & windows)" if scope == "observe" \
                 else T._summarize_action(scope, args)
@@ -267,15 +276,15 @@ def make_handler(hermes_home_fn):
     return mac_computer_use
 
 
-def schema() -> dict[str, Any]:
+def schema(name: str = "Mac") -> dict[str, Any]:
     from tools.computer_use.schema import COMPUTER_USE_SCHEMA
     s = copy.deepcopy(COMPUTER_USE_SCHEMA)
     s["name"] = "mac_computer_use"
     s["description"] = (
-        "Drive the USER'S MACBOOK screen (their own Mac, over SSH) — same actions and arguments as computer_use. "
+        f"Drive the screen of the USER'S OWN MAC ({name}, over SSH) — same actions and arguments as computer_use. "
         "Use this for anything in the user's Mac apps; `computer_use` drives the SERVER's own virtual screen "
         "instead. macOS shortcuts use cmd (cmd+s, cmd+t). Open apps with mac_shell(\"open -a <App>\") first, then "
         "capture(app=...). If the Mac is asleep or locked, captures fail: tell the user. Approvals here are "
         "stricter than on the server screen: looking at the screen needs one OK per session, and typed text / "
-        "key combos are approved per exact text.\n\n" + s.get("description", ""))
+        "key combos / set_value are approved per exact text.\n\n" + s.get("description", ""))
     return s

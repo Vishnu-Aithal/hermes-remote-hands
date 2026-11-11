@@ -75,12 +75,9 @@ def configure(*, settings_fn) -> None:
 
 def node_config() -> dict[str, Any]:
     """Node settings from the plugin config (``configure``), or the legacy ``$HERMES_HOME/remote_hands.json``."""
-    if _settings_fn is not None:
-        cfg = dict(_settings_fn())
-    else:
-        cfg = {"name": "Mac", "ssh_host": "", "driver": "~/.local/bin/cua-driver", "home": ""}
-        with contextlib.suppress(Exception):
-            cfg.update(json.loads((_hermes_home() / "remote_hands.json").read_text(encoding="utf-8")))
+    if _settings_fn is None:
+        raise RuntimeError("hermes-remote-hands backend used before the plugin was registered")
+    cfg = dict(_settings_fn())  # validated + normalised by the plugin (ssh_host charset, home absolute, …)
     host = str(cfg.get("ssh_host") or "")
     if not host or host.startswith("-") or any(c.isspace() for c in host):
         raise ValueError(f"invalid or missing ssh_host {host!r}")  # never let config smuggle ssh options
@@ -90,6 +87,10 @@ def node_config() -> dict[str, Any]:
         if not home.startswith("/"):
             raise ValueError("set the absolute 'home' setting (e.g. /Users/you) so '~' in the driver path resolves")
         driver = home + driver[1:]
+    # Absolute and plain: it becomes the first word of the remote command line (a leading '-' would be read
+    # by ssh as an option, a leading '=' is zsh EQUALS expansion on the Mac).
+    if not driver.startswith("/") or any(c in driver for c in "\n\r\0"):
+        raise ValueError(f"the 'driver' setting must be an absolute path on the Mac, got {driver!r}")
     cfg["driver"] = driver
     return cfg
 
@@ -112,12 +113,14 @@ def _ssh_target(host: str) -> tuple[str, int]:
     changes (e.g. the Mac's Tailscale IP moves)."""
     key = (host, _ssh_config_mtime())
     if key not in _target_cache:
-        hostname, port = host, 22
+        hostname, port, ok = host, 22, False
         with contextlib.suppress(Exception):
-            out = subprocess.run(["ssh", "-G", host], capture_output=True, text=True, timeout=5,
+            out = subprocess.run(["ssh", "-G", "--", host], capture_output=True, text=True, timeout=5,
                                  stdin=subprocess.DEVNULL).stdout
             kv = dict(line.split(" ", 1) for line in out.splitlines() if " " in line)
-            hostname, port = kv.get("hostname", host), int(kv.get("port", "22"))
+            hostname, port, ok = kv.get("hostname", host), int(kv.get("port", "22")), "hostname" in kv
+        if not ok:  # don't cache a failed lookup
+            return hostname, port
         _target_cache[key] = (hostname, port)
     return _target_cache[key]
 
@@ -221,7 +224,7 @@ def _build_session_cls():
             self.last_window_state: Optional[dict[str, Any]] = None
 
         def _ssh_argv(self, remote_cmd: str) -> list[str]:
-            return ["ssh", *_SSH_OPTS, self._node["ssh_host"], remote_cmd]
+            return ["ssh", *_SSH_OPTS, "--", self._node["ssh_host"], remote_cmd]
 
         def _driver_cmd(self, *args: str) -> str:
             """Remote command line, every element quoted. Telemetry follows the user's Hermes setting

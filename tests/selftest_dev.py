@@ -11,7 +11,7 @@ Never touches real sensitive files: the symlink target is a fake `.ssh` dir insi
 """
 import importlib.util, json, os, sys, time
 
-sys.path.insert(0, os.path.expanduser("~/.hermes/hermes-agent"))
+sys.path.insert(0, os.environ.get("HERMES_AGENT_SRC") or os.path.expanduser("~/.hermes/hermes-agent"))
 os.environ["HERMES_YOLO_MODE"] = "1"  # command guard: no human in this harness
 PLUGIN_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 spec = importlib.util.spec_from_file_location("remote_hands", os.path.join(PLUGIN_DIR, "__init__.py"))
@@ -19,12 +19,13 @@ m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 
 
-class _Ctx:  # minimal PluginContext stand-in: read settings the way the plugin does at runtime
+class _Ctx:  # minimal PluginContext stand-in: plugins.entries.<id>.settings.<key>, as ctx.get_config reads it
     plugin_id = "hermes-remote-hands"
 
     def get_config(self, key, default=None):
         from hermes_cli.config import load_config_readonly
-        entry = ((load_config_readonly() or {}).get("plugins") or {}).get("entries", {}).get(self.plugin_id) or {}
+        entries = (((load_config_readonly() or {}).get("plugins") or {}).get("entries") or {})
+        entry = entries.get(self.plugin_id) or {}
         return (entry.get("settings") or {}).get(key, default)
 
 

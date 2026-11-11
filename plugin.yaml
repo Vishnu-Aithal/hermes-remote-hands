@@ -1,7 +1,8 @@
 name: hermes-remote-hands
-version: "0.4.0"
+version: "0.5.0"
 description: >-
-  One Hermes brain on a server, hands on your own Mac. Over (Tailscale) SSH, with no agent and no memory on the Mac:
+  One Hermes brain on a server, hands on your own Mac. Over plain OpenSSH (e.g. on your tailnet), with no agent,
+  memory or model on the Mac:
   mac_computer_use drives the Mac's screen with Hermes's own computer_use actions (via cua-driver), mac_shell runs
   commands, mac_file / mac_patch / mac_search read, edit and search files, mac_process runs long jobs in tmux.
   Every call goes through Hermes's approval gate; credential and startup files always prompt.
@@ -24,31 +25,39 @@ provides_hooks:
 config_schema:
   ssh_host:
     type: str
+    label: "Mac SSH alias"
     default: ""
     required: true
-    description: "SSH alias of your Mac in ~/.ssh/config (e.g. macbook). Key auth only; BatchMode, StrictHostKeyChecking."
+    description: "Host alias of your Mac in your SSH client config (e.g. macbook). Key auth only (BatchMode, StrictHostKeyChecking)."
   home:
     type: str
+    label: "Home folder on the Mac"
     default: ""
     required: true
-    description: "Your home directory on the Mac, absolute (e.g. /Users/you). '~' in paths expands to this."
+    description: "Absolute, e.g. /Users/you. A leading '~' in paths expands to this."
   name:
     type: str
+    label: "Display name"
     default: "Mac"
-    description: "How the tools refer to the machine (e.g. MacBook Pro)."
+    description: "How the tools refer to the machine (e.g. MacBook Pro). Restart to apply."
   driver:
     type: str
+    label: "cua-driver path"
     default: "~/.local/bin/cua-driver"
     description: "Path to cua-driver on the Mac (only mac_computer_use needs it)."
   projects_dir:
     type: str
+    label: "Projects folder"
     default: ""
-    description: "Folder with your code (e.g. ~/Documents/Code). Session-level file grants reach only here; mac_search's default path."
+    description: "Folder inside home with your code (e.g. ~/Code). Session-level file grants reach only here (plus write_roots); mac_search's default path."
   write_roots:
     type: list
+    label: "Extra project folders"
     default: []
-    description: "Extra folders session-level file grants may reach."
+    description: "More folders inside home that session-level file grants may reach. Home itself and its parents are refused."
   shell_grants:
     type: str
+    label: "Command approvals"
     default: "per_command"
+    choices: [per_command, per_session]
     description: "per_command (default): a grant covers one exact command or typed text. per_session: one grant per conversation (an unrestricted shell; only if you accept that)."
