@@ -1,0 +1,54 @@
+name: hermes-remote-hands
+version: "0.4.0"
+description: >-
+  One Hermes brain on a server, hands on your own Mac. Over (Tailscale) SSH, with no agent and no memory on the Mac:
+  mac_computer_use drives the Mac's screen with Hermes's own computer_use actions (via cua-driver), mac_shell runs
+  commands, mac_file / mac_patch / mac_search read, edit and search files, mac_process runs long jobs in tmux.
+  Every call goes through Hermes's approval gate; credential and startup files always prompt.
+author: Vishnu Aithal
+license: MIT
+requires_hermes: ">=0.23.0"
+platforms: [linux, macos]
+provides_tools:
+  - mac_shell
+  - mac_file
+  - mac_patch
+  - mac_search
+  - mac_process
+  - mac_computer_use
+provides_hooks:
+  - pre_tool_call
+  - on_session_finalize
+  - on_session_reset
+  - post_compaction
+config_schema:
+  ssh_host:
+    type: str
+    default: ""
+    required: true
+    description: "SSH alias of your Mac in ~/.ssh/config (e.g. macbook). Key auth only; BatchMode, StrictHostKeyChecking."
+  home:
+    type: str
+    default: ""
+    required: true
+    description: "Your home directory on the Mac, absolute (e.g. /Users/you). '~' in paths expands to this."
+  name:
+    type: str
+    default: "Mac"
+    description: "How the tools refer to the machine (e.g. MacBook Pro)."
+  driver:
+    type: str
+    default: "~/.local/bin/cua-driver"
+    description: "Path to cua-driver on the Mac (only mac_computer_use needs it)."
+  projects_dir:
+    type: str
+    default: ""
+    description: "Folder with your code (e.g. ~/Documents/Code). Session-level file grants reach only here; mac_search's default path."
+  write_roots:
+    type: list
+    default: []
+    description: "Extra folders session-level file grants may reach."
+  shell_grants:
+    type: str
+    default: "per_command"
+    description: "per_command (default): a grant covers one exact command or typed text. per_session: one grant per conversation (an unrestricted shell; only if you accept that)."
