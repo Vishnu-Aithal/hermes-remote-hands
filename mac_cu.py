@@ -229,6 +229,11 @@ def _approve(rule_key: str, description: str, scope: str) -> Optional[str]:
 
 def make_handler(hermes_home_fn):
     def mac_computer_use(args: dict[str, Any], session_id: str = "", **_kw) -> Any:
+        home = hermes_home_fn()
+        try:  # settings first: an unconfigured plugin must not ask the user to approve anything
+            _remote_mac_module(home).node_config()
+        except Exception as e:
+            return json.dumps({"error": f"Mac computer use unavailable: {e}"})
         try:
             T = _tool_module()
         except Exception as e:
@@ -236,11 +241,6 @@ def make_handler(hermes_home_fn):
         action = (args.get("action") or "").strip().lower()
         if not action:
             return json.dumps({"error": "missing `action`"})
-        home = hermes_home_fn()
-        try:  # settings first: an unconfigured plugin must not ask the user to approve anything
-            _remote_mac_module(home).node_config()
-        except Exception as e:
-            return json.dumps({"error": f"Mac computer use unavailable: {e}"})
         if (err := T._reject_unsafe(action, args)) is not None:
             return err
         scopes = (["observe"] if action in _OBSERVE else []) + (
