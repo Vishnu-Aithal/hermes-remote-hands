@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.2 — 2026-11-11
+- Tools appear only once both `ssh_host` and `home` are set (as documented).
+- Bypass guard: plain-language prompts; touching the plugin's own code now also says that running it connects to
+  the Mac; `a//b` and `a/./b` spellings of the plugin path are caught too.
+- Clearer errors: one "not reachable" wording (now mentions Remote Login), a woken Mac is retried after 3 s
+  instead of 20 s, timeouts say whether the command was stopped and point to `mac_process`, cua-driver failures
+  say what to check, a missing `python3` is named instead of "could not resolve symlinks" (and an unchecked
+  folder no longer reads "SENSITIVE command"), install hints for `tmux`.
+- Screen approval cards use the Mac's configured name; shorter tool descriptions.
+- README: first-run check, example values for the placeholders, step-4 details, more troubleshooting rows,
+  approvals-off/YOLO caveat, cua-driver installer not pinned, full background-process disclosure.
+
 ## 0.5.1 — 2026-11-11
 - Bypass-guard prompts say what matched: a call that only touches this plugin's own code or settings on the
   server no longer claims it is "reaching the user's Mac". Every prompt now states it is a one-time approval

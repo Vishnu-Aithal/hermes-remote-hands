@@ -1,5 +1,5 @@
 name: hermes-remote-hands
-version: "0.5.1"
+version: "0.5.2"
 description: >-
   One Hermes brain on a server, hands on your own Mac. Over plain OpenSSH (e.g. on your tailnet), with no agent,
   memory or model on the Mac:
@@ -28,7 +28,7 @@ config_schema:
     label: "Mac SSH alias"
     default: ""
     required: true
-    description: "Host alias of your Mac in your SSH client config (e.g. macbook). Key auth only (BatchMode, StrictHostKeyChecking)."
+    description: "The Host alias for your Mac in the server's SSH config (e.g. macbook). It must log in with a key and no prompts: test with ssh <alias> true."
   home:
     type: str
     label: "Home folder on the Mac"

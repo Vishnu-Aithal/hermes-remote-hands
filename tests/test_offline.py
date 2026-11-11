@@ -131,6 +131,17 @@ def test_bypass_guard_messages():
     assert "reaching the user's Mac" in both, both  # the Mac message wins when both match
     own = m._pre_tool_call("search_files", {"pattern": "entries\\.hermes-remote-hands", "path": "."})
     assert own is not None and "own code or settings" in own["message"], own
+    run = _hook("python3 ~/.hermes/plugins/hermes-remote-hands/tests/selftest_dev.py")["message"]
+    assert "running the plugin's code connects to the Mac" in run, run  # never sounds local-only
+    for cmd in ("cat ~/.hermes/plugins//hermes-remote-hands/x.py", "cat ~/.hermes/plugins/./hermes-remote-hands/x"):
+        assert _hook(cmd) is not None, cmd
+
+
+def test_tools_need_home_too():
+    configure(ssh_host="macbook")
+    assert not m._configured()  # tools stay hidden until home is set as well
+    configure(**GOOD)
+    assert m._configured()
 
 
 def test_ssh_argv_has_end_of_options():
@@ -166,6 +177,8 @@ def test_screen_backend_settings_and_grants():
     k2, _ = cu._approval("set_value", "set_value", {"value": "ls"}, "", "per_command")
     k3, _ = cu._approval("type", "type", {"text": "ls"}, "", "per_session")
     assert k1 != k2 and k1.startswith("mac_cua:set_value:") and k3 == "mac_cua:type:background"
+    _, d = cu._approval("click", "click", {}, "click element 3", "per_command", name="MacBook Pro")
+    assert d == "On MacBook Pro: click element 3", d
     configure()
     handler = cu.make_handler(lambda: Path(os.environ["HERMES_HOME"]))
     err = json.loads(handler({"action": "capture"}))["error"]  # no approval prompt when unconfigured

@@ -204,15 +204,16 @@ def _shell_grants(hermes_home: Path) -> str:
 _PER_TEXT = {"type": "text", "key": "keys", "set_value": "value"}
 
 
-def _approval(action: str, scope: str, args: dict[str, Any], summary: str, grants: str) -> tuple[str, str]:
-    """(rule_key, description) for one approval scope."""
+def _approval(action: str, scope: str, args: dict[str, Any], summary: str, grants: str, *,
+              name: str = "the Mac") -> tuple[str, str]:
+    """(rule_key, description) for one approval scope; *name* is the Mac's configured display name."""
     mode = "foreground" if args.get("delivery_mode") == "foreground" else "background"
     if scope in _PER_TEXT and grants != "per_session":
         payload = str(args.get(_PER_TEXT[scope]) or "")
         digest = hashlib.sha256(payload.encode("utf-8", "replace")).hexdigest()[:12]
         shown = json.dumps(payload[:2000]) + (" …(truncated)" if len(payload) > 2000 else "")
-        return f"mac_cua:{scope}:{mode}:{digest}", f"On the user's Mac: {scope} {shown} ({mode})"
-    return f"mac_cua:{scope}:{mode}", f"On the user's Mac: {summary}"
+        return f"mac_cua:{scope}:{mode}:{digest}", f"On {name}: {scope} {shown} ({mode})"
+    return f"mac_cua:{scope}:{mode}", f"On {name}: {summary}"
 
 
 def _approve(rule_key: str, description: str, scope: str) -> Optional[str]:
@@ -231,7 +232,7 @@ def make_handler(hermes_home_fn):
     def mac_computer_use(args: dict[str, Any], session_id: str = "", **_kw) -> Any:
         home = hermes_home_fn()
         try:  # settings first: an unconfigured plugin must not ask the user to approve anything
-            _remote_mac_module(home).node_config()
+            mac_name = str(_remote_mac_module(home).node_config().get("name") or "the Mac")
         except Exception as e:
             return json.dumps({"error": f"Mac computer use unavailable: {e}"})
         try:
@@ -251,7 +252,7 @@ def make_handler(hermes_home_fn):
         for scope in scopes:
             summary = "look at the screen (capture / list apps & windows)" if scope == "observe" \
                 else T._summarize_action(scope, args)
-            rule_key, description = _approval(action, scope, args, summary, grants)
+            rule_key, description = _approval(action, scope, args, summary, grants, name=mac_name)
             if (err := _approve(rule_key, description, scope)) is not None:
                 return err
         sid = str(session_id or "")
@@ -260,7 +261,10 @@ def make_handler(hermes_home_fn):
             try:
                 backend, call_lock = _backend_for(key, home)
             except Exception as e:
-                return json.dumps({"error": f"Mac computer use unavailable: {e}"})
+                hint = "" if "not reachable" in str(e) else (
+                    ". Check that cua-driver is installed on the Mac at the 'driver' setting's path and its daemon "
+                    "is running (`cua-driver permissions status`)")
+                return json.dumps({"error": f"Mac computer use unavailable: {e}{hint}"})
             try:
                 with call_lock:
                     with _lock:  # re-validate: a release/compaction may have retired this backend while we waited
@@ -284,7 +288,5 @@ def schema(name: str = "Mac") -> dict[str, Any]:
         f"Drive the screen of the USER'S OWN MAC ({name}, over SSH) — same actions and arguments as computer_use. "
         "Use this for anything in the user's Mac apps; `computer_use` drives the SERVER's own virtual screen "
         "instead. macOS shortcuts use cmd (cmd+s, cmd+t). Open apps with mac_shell(\"open -a <App>\") first, then "
-        "capture(app=...). If the Mac is asleep or locked, captures fail: tell the user. Approvals here are "
-        "stricter than on the server screen: looking at the screen needs one OK per session, and typed text / "
-        "key combos / set_value are approved per exact text.\n\n" + s.get("description", ""))
+        "capture(app=...). If the Mac is asleep or locked, captures fail: tell the user.\n\n" + s.get("description", ""))
     return s

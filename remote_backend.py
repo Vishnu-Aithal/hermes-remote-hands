@@ -74,7 +74,7 @@ def configure(*, settings_fn) -> None:
 
 
 def node_config() -> dict[str, Any]:
-    """Node settings from the plugin config (``configure``), or the legacy ``$HERMES_HOME/remote_hands.json``."""
+    """Node settings from the plugin config (``configure``)."""
     if _settings_fn is None:
         raise RuntimeError("hermes-remote-hands backend used before the plugin was registered")
     cfg = dict(_settings_fn())  # validated + normalised by the plugin (ssh_host charset, home absolute, …)
@@ -126,12 +126,13 @@ def _ssh_target(host: str) -> tuple[str, int]:
 
 
 def node_reachable(host: Optional[str] = None) -> bool:
-    """TCP probe of the node's SSH port, cached 20 s. Called at session start, not in the tool-list hot path."""
+    """TCP probe of the node's SSH port, cached 20 s (3 s when unreachable). Called at session start, not in the
+    tool-list hot path."""
     try:
         host = host or node_config()["ssh_host"]
         with _reach_lock:
             hit = _reach_cache.get(host)
-            if hit and time.monotonic() - hit[0] < _REACH_TTL:
+            if hit and time.monotonic() - hit[0] < (_REACH_TTL if hit[1] else 3.0):
                 return hit[1]
         ok = False
         with contextlib.suppress(OSError):
@@ -354,7 +355,7 @@ def _build_backend_cls():
             importlib.invalidate_caches()
             if not node_reachable(self._node["ssh_host"]):
                 raise RuntimeError(f"{self._node.get('name', 'the Mac')} ({self._node['ssh_host']}) is not reachable "
-                                   "over SSH — it is asleep, the lid is closed, or it is off Tailscale. Ask the "
+                                   "over SSH — asleep, lid closed, off Tailscale, or Remote Login is off. Ask the "
                                    "user to wake it, then retry.")
             self._session.start()
             self._best_effort("start_session failed (continuing anonymous)",

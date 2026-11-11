@@ -77,15 +77,20 @@ server never grants it on the Mac.
 - **Looking at the screen** (capture / list apps & windows) needs one OK per session.
 - Hermes's terminal guards (hardline blocks, dangerous-pattern prompts) run on every `mac_shell` command.
 - **Bypass guard:** a `pre_tool_call` hook sends any *other* tool call that mentions the Mac (its SSH alias or IP,
-  its key file, the SSH control socket, this plugin's settings or code) to a single-use approval, so
-  `terminal: ssh <mac> …` can't route around these rules. It stays on even if the settings are missing or broken.
-  The prompt says which it was: reaching the Mac, or touching the plugin's own files on the server (editing
-  them could weaken the guard). Each prompt covers one call, even if you answer "session" or "always".
-- Unattended runs (cron, no human attached) fail closed.
+  its key file, the SSH control socket) or this plugin's own code or settings to a single-use approval, so the
+  obvious routes around these rules (`terminal: ssh <mac> …`, editing the plugin) ask first. It is a best-effort
+  keyword check, not a sandbox, and stays on even if the settings are missing or broken. The prompt says which
+  it was: reaching the Mac, or touching the plugin's own code or settings (running that code connects to the
+  Mac). Each prompt covers one call whichever option you pick; prefer **Once**, since an "always" answer still
+  saves an unused entry to `command_allowlist`.
+- Unattended runs (cron, `hermes chat -q`) fail closed unless you set `approvals.cron_mode` /
+  `single_query_mode` to `approve`.
+- All of this applies while Hermes approvals are on: YOLO mode or `approvals.mode: off` approves everything,
+  Mac actions included.
 
 ## Requirements
 
-- **Server:** Hermes Agent **≥ 0.23.0** (Linux or macOS) with OpenSSH. Tested on 0.23.1, Ubuntu 24.04.
+- **Server:** Hermes Agent **≥ 0.23.0** (Linux or macOS) with OpenSSH. Tested on 0.23.1, Ubuntu 26.04.
 - **Mac:** macOS 14+, reachable over SSH (Tailscale recommended), with:
   - Command Line Tools for `python3` (`xcode-select --install`): used to resolve paths safely on the Mac;
   - [Homebrew](https://brew.sh) `tmux` (for `mac_process`) and `ripgrep` (for `mac_search`): `brew install tmux ripgrep`;
@@ -108,7 +113,7 @@ ssh-keygen -t ed25519 -N "" -C hermes-remote-hands -f ~/.ssh/hermes_remote_hands
 cat >> ~/.ssh/config <<'EOF'
 Host macbook
   HostName 100.x.y.z            # the Mac's Tailscale IP
-  User you
+  User you                      # your Mac username: run whoami on the Mac
   IdentityFile ~/.ssh/hermes_remote_hands
   IdentitiesOnly yes
 EOF
@@ -117,14 +122,16 @@ ssh-keygen -lf ~/.ssh/known_hosts | tail -1    # compare with: ssh-keygen -lf /e
 cat ~/.ssh/hermes_remote_hands.pub              # copy this line for step 4
 ```
 
-**4. On the Mac: authorize the key.** In a text editor, add the public key as one new line of the Mac's
-`authorized_keys` file, prefixed with options that restrict it to the server's address and disable forwarding:
+**4. On the Mac: authorize the key.** Open `~/.ssh/authorized_keys` in a text editor (if the folder is missing,
+run `mkdir -m 700 ~/.ssh` first) and add the public key as one new line, prefixed with options that restrict it
+to the server's address and disable forwarding. `<server tailscale ip>` is what `tailscale ip -4` prints **on the
+server**:
 
 ```text
 restrict,from="<server tailscale ip>" ssh-ed25519 AAAA… hermes-remote-hands
 ```
 
-Keep that file readable only by you (mode 600). Recommended: turn off password logins.
+Then `chmod 600 ~/.ssh/authorized_keys`. Recommended: turn off password logins.
 
 ```bash
 sudo tee /etc/ssh/sshd_config.d/000-hermes-hardening.conf >/dev/null <<'EOF'
@@ -138,7 +145,9 @@ sudo sshd -t && echo OK
 Check from the server: `ssh macbook 'echo ok; sw_vers -productVersion'`.
 
 **5. On the Mac: screen control (optional).** Install cua-driver, grant permissions **at the Mac itself** (the
-prompts don't work over SSH), turn its telemetry off, and let launchd own the daemon:
+prompts don't work over SSH), turn its telemetry off, and let launchd own the daemon. The installer fetches the
+latest cua-driver release (not pinned); the plugin is verified with 0.44.0 and logs a warning for other versions
+until you run the self-test:
 
 ```bash
 /bin/bash -c "$(curl -fsSL https://cua.ai/driver/install.sh)"
@@ -163,15 +172,14 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.trycua.cua-driver.pl
 ~/.local/bin/cua-driver permissions status --json   # accessibility/screen_recording true, "driver-daemon"
 ```
 
-**6. On the server: install and configure.** Until the catalog entry is merged, install from GitHub (Hermes asks
-you to confirm a source it hasn't reviewed; add `--force` when there is no terminal to answer, e.g. in a script).
-After the merge, `hermes plugins install hermes-remote-hands --enable` works.
+**6. On the server: install and configure.** Install by name from the plugin catalog, or straight from GitHub
+(`hermes plugins install Vishnu-Aithal/hermes-remote-hands --enable`):
 
 ```bash
-hermes plugins install Vishnu-Aithal/hermes-remote-hands --enable
+hermes plugins install hermes-remote-hands --enable
 S=plugins.entries.hermes-remote-hands.settings
 hermes config set $S.ssh_host macbook
-hermes config set $S.home /Users/you
+hermes config set $S.home /Users/you              # run echo $HOME on the Mac
 hermes config set $S.projects_dir '~/Code'        # quote the ~ so the SERVER's shell doesn't expand it
 hermes gateway restart                            # or start a new CLI session
 ```
@@ -179,19 +187,28 @@ hermes gateway restart                            # or start a new CLI session
 The `mac_*` tools appear (toolset `mac`) once `ssh_host` and `home` are set. The same settings are on the
 plugin's page in Hermes Desktop (**Settings → Plugins**).
 
+**Check it:** start a new chat and ask *"On my Mac, run `sw_vers`."* An approval card shows the exact command
+(in the CLI, Desktop or your messaging app). Approve it and the macOS version comes back. If not, see
+Troubleshooting.
+
 | Setting | Default | Meaning |
 |---|---|---|
 | `ssh_host` | — (required) | SSH alias of the Mac. A distinctive name (4+ characters) keeps the bypass guard quiet. |
 | `home` | — (required) | Absolute home dir on the Mac (`~` expands to it). |
 | `name` | `Mac` | How tools refer to the machine. |
 | `driver` | `~/.local/bin/cua-driver` | cua-driver path on the Mac. |
-| `projects_dir` | — | Folder inside home with your code; session file grants reach only here (plus `write_roots`). |
+| `projects_dir` | — (recommended) | Folder inside home with your code. Session-wide file approvals only cover this folder (plus `write_roots`); without it, every file read and write asks again. |
 | `write_roots` | `[]` | More folders inside home for session file grants (comma-separated text works too). Home itself and its parents are refused. |
 | `shell_grants` | `per_command` | `per_session` = one grant per chat (an unrestricted shell). |
 
 ## Try it
 
-> On my Mac, open Calculator and work out 12 × 12.
+Each Mac action shows an approval card first. "Session" covers repeats in this chat; commands and typed text are
+approved one exact text at a time.
+
+> On my Mac, what macOS version am I on and how much disk is free?
+
+> On my Mac, open Calculator and work out 12 × 12. *(needs step 5)*
 
 > On my Mac, in ~/Code/myapp, start the dev server, then tell me what the first page logs.
 
@@ -202,17 +219,20 @@ plugin's page in Hermes Desktop (**Settings → Plugins**).
 | Symptom | Fix |
 |---|---|
 | `Host key verification failed` | Re-run the `ssh-keyscan` line from step 3 (after Remote Login is on), and compare fingerprints. |
-| `is not reachable — asleep, lid closed …` | Wake the Mac; check `tailscale status` on both machines. |
+| `is not reachable over SSH — asleep, lid closed …` | Wake the Mac; check `tailscale status` on both machines and that Remote Login is on. |
+| `ssh failed: … Permission denied (publickey)` | The key line on the Mac is wrong, or its `from="…"` IP isn't the server's Tailscale IP (`tailscale ip -4` on the server). Test with `ssh macbook true`. |
 | `Operation not permitted` on `~/Documents/…` | Step 2: allow full disk access for remote users, or keep code outside the protected folders. |
 | Captures are empty / "locked" | Unlock the Mac; screen control needs your user logged in at the console. |
+| `Mac computer use unavailable: …` | Check cua-driver on the Mac: the `driver` setting's path and `cua-driver permissions status --json` (step 5). |
 | `accessibility`/`screen_recording` false | Run `cua-driver permissions grant` **at the Mac**, then `launchctl kickstart -k gui/$(id -u)/com.trycua.cua-driver`. |
-| Every file op asks for approval | `python3` is missing on the Mac (`xcode-select --install`), or `projects_dir` points to a server path (quote the `~`). |
+| Every file action asks for approval | `projects_dir` isn't set, or points to a server path (quote the `~`), or `python3` is missing on the Mac (`xcode-select --install`). |
 | No `mac_*` tools | `ssh_host` / `home` not set or invalid (see `hermes logs`), or the gateway wasn't restarted. Also check `hermes tools list` shows `mac` enabled; if not, `hermes tools enable mac --platform cli` (another plugin with a `mac` toolset being disabled can remove it), then start a new chat. |
 
 ## Uninstall
 
 - Server: `hermes plugins remove hermes-remote-hands`; delete the `Host` block, `~/.ssh/hermes_remote_hands*`, and
-  `$HERMES_HOME/cache/ssh/`.
+  `$HERMES_HOME/cache/ssh/`. If you ever answered "always" on a Mac prompt, remove the `plugin_rule:mac_…` lines
+  from `command_allowlist` in `config.yaml`.
 - Mac: remove the key's line from `authorized_keys`; `tmux -L hermes kill-server`; delete the `hermes-dev` folder
   in `~/Library/Logs`; for cua-driver: `launchctl bootout gui/$(id -u)/com.trycua.cua-driver` and delete the plist.
 
@@ -227,12 +247,14 @@ plugin's page in Hermes Desktop (**Settings → Plugins**).
 - **Network:** SSH to the configured host only. No third-party services, no telemetry. cua-driver's own telemetry
   is turned off by step 5 for the daemon, and per call for the client when Hermes's `computer_use.cua_telemetry`
   is off.
-- **Background processes:** an SSH ControlMaster on the server for up to 30 s after the last call; on the Mac,
-  `mac_process` jobs in a private tmux server (`tmux -L hermes`) with logs in `~/Library/Logs/hermes-dev/`.
+- **Background processes:** an SSH ControlMaster on the server for up to 30 s after the last call; while
+  `mac_computer_use` is in use, one `ssh … cua-driver mcp` session per chat (closed when the chat ends or resets,
+  or the plugin unloads); on the Mac, `mac_process` jobs in a private tmux server (`tmux -L hermes`) with logs in
+  `~/Library/Logs/hermes-dev/`.
 - **Screenshots** of the Mac are handled like built-in `computer_use` captures (saved under
   `$HERMES_HOME/cache/images`, sent to your configured model or auxiliary vision model).
 - **Internals:** to behave exactly like `computer_use`, the plugin subclasses and calls `tools.computer_use`
-  internals and Hermes's approval functions (no runtime patching). It checks for them at load and fails closed
+  internals and Hermes's approval functions (no runtime patching). It checks them before use and fails closed
   with a clear message if a Hermes release changes them; run the self-tests after updating.
 
 ## Limitations
@@ -246,10 +268,10 @@ plugin's page in Hermes Desktop (**Settings → Plugins**).
 ## Tests
 
 ```bash
+cd ~/.hermes/plugins/hermes-remote-hands   # the installed plugin folder (or your checkout)
 python3 tests/test_offline.py        # no Mac needed: settings validation, bypass guard, root limits, approval keys
 
-# against a real Mac (awake, unlocked), from the plugin folder, with the Hermes venv python:
-cd ~/.hermes/plugins/hermes-remote-hands
+# against a real Mac (awake, unlocked), with the Hermes venv python:
 PY=$(find ~/.hermes/installs -path '*/venv/bin/python' | head -1)   # or the venv your Hermes runs from
 $PY tests/selftest_screen.py     # opens Calculator, clicks 7 × 6 = by element index, reads 42 back, checks hard blocks
 $PY -I tests/selftest_dev.py     # 41 checks: path gates, symlinks, approvals, bypass guard, timeouts, tmux, patch

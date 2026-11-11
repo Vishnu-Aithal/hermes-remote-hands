@@ -3,8 +3,8 @@ removed after; must be inside projects_dir so session grants apply).
 
     PY=$(find ~/.hermes/installs -path '*/venv/bin/python' | head -1); $PY -I tests/selftest_dev.py
 
-Uses the plugin settings from config.yaml (plugins.entries.hermes-remote-hands.settings) or the legacy
-$HERMES_HOME/remote_hands.json; projects_dir must be set.
+Uses the plugin settings from config.yaml (plugins.entries.hermes-remote-hands.settings); projects_dir must
+be set.
 
 Approvals are stubbed with a recorder (approve + log rule_key/reason) so the gate DECISIONS are asserted too.
 Never touches real sensitive files: the symlink target is a fake `.ssh` dir inside the test dir.
