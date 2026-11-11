@@ -7,8 +7,8 @@ see and click its apps, run commands, edit code, run dev servers. Memory, skills
 place on the server. Nothing agent-like runs on the Mac: no second Hermes, no second memory, no model calls. The
 only things on the Mac are its own `sshd` and, for screen control, [cua-driver](https://github.com/trycua/cua).
 
-<!-- demo: replace with the uploaded video / GIF -->
-> **Demo (90 s):** _link coming_
+> **▶ Demo (86 s):** [watch on X](https://x.com/Vishnu_Aithal/status/2120409383104614706): Calculator clicked on the
+> Mac, code written and served, both machines in one answer, the server's own screen, and a credential read rejected.
 
 ```
  ┌──────────────── server (the brain) ───────────────┐
