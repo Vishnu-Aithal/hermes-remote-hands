@@ -10,6 +10,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 PLUGIN_DIR = Path(__file__).resolve().parent.parent
@@ -135,6 +136,88 @@ def test_bypass_guard_messages():
     assert "running the plugin's code connects to the Mac" in run, run  # never sounds local-only
     for cmd in ("cat ~/.hermes/plugins//hermes-remote-hands/x.py", "cat ~/.hermes/plugins/./hermes-remote-hands/x"):
         assert _hook(cmd) is not None, cmd
+
+
+def test_bypass_guard_large_args_stay_fast():
+    # The hook runs on every tool call while holding the GIL: a big argument full of `ssh` words must not make the
+    # control-socket check quadratic. The old `\bssh\b.*(...)` regex took ~2 s on 40 KB of these lines and grew with
+    # the square of the size. Indented: in the JSON blob a bare "\n" glues to the next word ("nssh"), so unindented
+    # lines leave only one `ssh` word and never showed the slowdown.
+    configure(**GOOD)
+    content = "  ssh host x\n" * (200_000 // 13)
+    for args, want in (({"path": "notes.txt", "content": content}, None),
+                       ({"path": "notes.txt", "content": content + "ssh -S /tmp/sock h id\n"}, "ssh control socket"),
+                       ({"command": "ssh " + "-o a=b " * 200 + "-S /tmp/sock h id"}, "ssh control socket")):
+        t0 = time.perf_counter()
+        res = m._pre_tool_call("write_file" if "content" in args else "terminal", args)
+        took = time.perf_counter() - t0
+        assert took < 1.0, f"guard took {took:.2f}s"
+        assert (res is None) if want is None else (want in res["message"]), res
+    assert m._control_socket_use("x ssh y -s ~/s") and not m._control_socket_use("-s ~/s then ssh y")
+
+
+def test_bypass_guard_sees_line_breaks_as_separators():
+    # In the JSON blob a newline/tab is the escape `\n`/`\t`; once backslashes are stripped it must not glue onto
+    # the next word (`nssh`), or a command or alias at the start of a line slips past the guard.
+    configure(**GOOD)
+    ssh, sock = "s" + "sh", "-" + "S /tmp/s"
+    for cmd in (f"cd /tmp\n{ssh} {sock} x id", f"cd /tmp\t{ssh} {sock} x id", f"{ssh}\t{sock} x id",
+                f"{ssh} -{chr(83)}\n/tmp/s x id", "cat hosts\nmacbook\n", "a\r\nmacbook:/tmp"):
+        assert _hook(cmd) is not None, repr(cmd)
+    for cmd in ("printf 'a\\nb'", "echo \\\\n\\\\t", "ls\n\tgit status\r\n", "caf\u00e9 \u2028 notes"):
+        assert _hook(cmd) is None, repr(cmd)
+    # An escaped backslash before n/t stays a backslash (stripped like any other), not a line break.
+    assert m._flatten(json.dumps("mac\\nbook")) == "macnbook" and m._flatten(json.dumps("a\nb")) == "a b"
+
+
+def test_guard_fast_paths_match_reference_regexes():
+    # The hook's string-scan helpers must keep the exact behaviour of the simple regexes they replace.
+    import random
+    import re
+    rnd = random.Random(1)
+    ssh, dash, cp = "s" + "sh", "-" + "s", "control" + "path"  # built here so this file itself stays unflagged
+    toks = [ssh, " ", dash, "~", "/", "$", "${", "{", "}", "'", '"', "`", "\\", "\n", "\t", cp, "macbook", "mac",
+            "book", "aa", "a", "_", "-", "0", "é", "@", ":", "."]
+    old_socket = re.compile(r"\b" + ssh + r"\b.*(\s" + dash + r"(\s|[~/$])|" + cp + ")")
+    for _ in range(20_000):
+        t = "".join(rnd.choice(toks) for _ in range(rnd.randint(0, 12)))
+        assert m._strip_quoting(t) == re.sub(r"[\\'\"`]|\$\{?\w*\}?", "", t), t
+        assert m._control_socket_use(t) == (old_socket.search(t) is not None) or "\n" in t, t
+        for mk in ("macbook", "aa", "a.a"):
+            assert m._mentions(mk, t) == (re.search(r"(?<![a-z0-9])" + re.escape(mk) + r"(?![a-z0-9])", t)
+                                          is not None), (mk, t)
+
+
+def test_ssh_lookups_get_minimal_env():
+    # `ssh -G` can run `Match exec` commands from ssh_config: it must never inherit provider keys.
+    configure(**GOOD)
+    seen = []
+
+    def run(argv, **kw):
+        seen.append(kw.get("env"))
+        return _fake_run(argv, **kw)
+
+    saved_key, orig = os.environ.get("OPENAI_API_KEY"), m.subprocess.run  # one shared subprocess module
+    try:
+        cu = _load("_rh_offline_cu_env", "mac_cu.py")
+        cu.configure(settings_fn=m._node)
+        rb = cu._remote_mac_module()
+        os.environ["OPENAI_API_KEY"] = "sk-test-secret"
+        m.subprocess.run = run
+        assert m._env() == rb._ssh_env()  # the two modules' allow-lists must not drift apart
+        m._ssh_target("macbook")
+        m._identity_files("macbook")
+        rb._target_cache.clear()
+        rb._ssh_target("macbook")
+    finally:
+        m.subprocess.run = orig
+        if saved_key is None:
+            os.environ.pop("OPENAI_API_KEY", None)
+        else:
+            os.environ["OPENAI_API_KEY"] = saved_key
+    assert len(seen) == 3, seen
+    for env in seen:
+        assert env is not None and "OPENAI_API_KEY" not in env and "PATH" in env, env
 
 
 def test_tools_need_home_too():

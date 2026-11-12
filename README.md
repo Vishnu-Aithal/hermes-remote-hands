@@ -243,7 +243,9 @@ approved one exact text at a time.
   and only after Hermes's approval gate. **Anyone who controls the Hermes server can control the Mac**: protect
   the server (and its web/desktop login) accordingly.
 - **Credentials:** the plugin never reads, stores or copies keys. OpenSSH uses the key named in your SSH config;
-  `ssh -G` reads that config to resolve the alias.
+  `ssh -G` reads that config to resolve the alias. Every ssh it starts gets only `PATH`, `HOME`, `USER`, `LANG`
+  and `SSH_AUTH_SOCK` from Hermes's environment (never provider keys), so the Mac's `Host` block must not rely on
+  other variables (`${VAR}` expansion, `Match exec`).
 - **Network:** SSH to the configured host only. No third-party services, no telemetry. cua-driver's own telemetry
   is turned off by step 5 for the daemon, and per call for the client when Hermes's `computer_use.cua_telemetry`
   is off.

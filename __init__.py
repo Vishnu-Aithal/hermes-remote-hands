@@ -155,7 +155,7 @@ def _ssh_target(host: str) -> tuple[str, int]:
     hostname, port, ok = host, 22, False
     with contextlib.suppress(Exception):
         out = subprocess.run(["ssh", "-G", "--", host], capture_output=True, text=True, timeout=5,
-                             stdin=subprocess.DEVNULL).stdout
+                             stdin=subprocess.DEVNULL, env=_env()).stdout
         kv = dict(line.split(" ", 1) for line in out.splitlines() if " " in line)
         hostname, port, ok = kv.get("hostname", host), int(kv.get("port", "22")), "hostname" in kv
     if ok:  # never cache a failed lookup (it would hide the real IP from the bypass guard)
@@ -864,7 +864,7 @@ def _identity_files(host: str) -> tuple[str, ...]:
         ok = False
         with contextlib.suppress(Exception):
             out = subprocess.run(["ssh", "-G", "--", host], capture_output=True, text=True, timeout=5,
-                                 stdin=subprocess.DEVNULL).stdout
+                                 stdin=subprocess.DEVNULL, env=_env()).stdout
             for line in out.splitlines():
                 ok = ok or line.startswith("hostname ")
                 if line.startswith("identityfile "):
@@ -900,9 +900,60 @@ def _mac_markers() -> tuple[str, ...]:
     return tuple(sorted(m.lower() for m in marks if m and len(m) >= 2))
 
 
+_WORD_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789")
+
+
 def _mentions(marker: str, text: str) -> bool:
-    """Token match: 'macbook' hits `ssh macbook`, `user@macbook:` and `~/.ssh/macbook_key`, not 'umbrella'."""
-    return re.search(r"(?<![a-z0-9])" + re.escape(marker) + r"(?![a-z0-9])", text) is not None
+    """Token match: 'macbook' hits `ssh macbook`, `user@macbook:` and `~/.ssh/macbook_key`, not 'umbrella'.
+    Same result as `(?<![a-z0-9])marker(?![a-z0-9])`, but via str.find: a regex that starts with a lookbehind is
+    tried at every position (~0.3 s per MB per marker), and this runs on every tool call's arguments."""
+    n, i = len(marker), text.find(marker)
+    while i != -1:
+        if (i == 0 or text[i - 1] not in _WORD_CHARS) and text[i + n:i + n + 1] not in _WORD_CHARS:
+            return True
+        i = text.find(marker, i + 1)
+    return False
+
+
+_SHELL_VAR_RE = re.compile(r"\$\{?\w*\}?")
+_QUOTE_CHARS = str.maketrans("", "", "\\'\"`")
+
+
+def _strip_quoting(text: str) -> str:
+    """Delete shell variables, then quote/backslash characters. Same output as one `[\\\\'"`]|\\$\\{?\\w*\\}?` pass
+    (a `$` match never contains a quote character, and a quote is never part of a `$` match), but each step can use
+    a fast scan instead of trying an alternation at every position."""
+    return _SHELL_VAR_RE.sub("", text).translate(_QUOTE_CHARS)
+
+
+_JSON_SPACE_ESC_RE = re.compile(r"\\(?:[ntrbf]|u[0-9a-f]{4})")
+
+
+def _flatten(blob: str) -> str:
+    """The lowercased JSON of a tool call's arguments, normalised for matching: JSON escapes for newlines, tabs,
+    other control and non-ASCII characters become spaces (otherwise `\\n` + `ssh` turns into the word `nssh` once
+    backslashes go, and a command or alias at the start of a line is missed); then quoting is stripped
+    (mac''book, mac\\book, mac${x}book -> macbook) and a//b, a/./b become a/b (best effort: globs are not
+    expanded)."""
+    # An escaped backslash is the pair `\\`; park it on NUL (json.dumps never emits a raw control character) so
+    # its second half can't be read as the start of `\n`. NUL then stays a non-word character, like the
+    # backslash it stands for, until quoting is stripped.
+    text = _JSON_SPACE_ESC_RE.sub(" ", blob.replace("\\\\", "\x00"))
+    text = _strip_quoting(text).replace("\x00", "")
+    return re.sub(r"/(?:\.?/)+", "/", text)
+
+
+_SSH_WORD_RE = re.compile(r"\bssh\b")
+_SOCKET_OPT_RE = re.compile(r"\s-s(?:\s|[~/$])|controlpath")
+
+
+def _control_socket_use(flat: str) -> bool:
+    """An `ssh` word followed anywhere later by `-S <socket>` or a ControlPath option (`flat` is lowercased).
+    Same matches as `\\bssh\\b.*(…)` on `flat` (which never holds a raw newline; on text that does, this matches
+    a superset), but linear time: if any ssh word precedes an option, the first one does, so two independent
+    scans suffice. No length window, so padding the options can't hide the socket."""
+    first = _SSH_WORD_RE.search(flat)
+    return first is not None and _SOCKET_OPT_RE.search(flat, first.end()) is not None
 
 
 def _pre_tool_call(tool_name: str = "", args: Any = None, **_kw) -> Optional[dict]:
@@ -912,10 +963,9 @@ def _pre_tool_call(tool_name: str = "", args: Any = None, **_kw) -> Optional[dic
         if tool_name in _OWN_TOOLS or not args:
             return None
         blob = json.dumps(args, default=str).lower()
-        flat = re.sub(r"[\\'\"`]|\$\{?\w*\}?", "", blob)  # mac''book, mac\\book, mac${x}book -> macbook
-        flat = re.sub(r"/(?:\.?/)+", "/", flat)  # a//b and a/./b -> a/b (best effort: globs are not expanded)
+        flat = _flatten(blob)
         hit = next((m for m in _mac_markers() if _mentions(m, blob) or _mentions(m, flat)), None)
-        if hit is None and re.search(r"\bssh\b.*(\s-s(\s|[~/$])|controlpath)", flat):
+        if hit is None and _control_socket_use(flat):
             hit = "ssh control socket"
         if hit is not None:  # reaching the Mac wins over a self-marker in the same call
             message = (f"`{tool_name}` is reaching the user's Mac directly (matched '{hit}'), bypassing the "

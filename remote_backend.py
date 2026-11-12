@@ -108,6 +108,12 @@ def _ssh_config_mtime() -> float:
         return 0.0
 
 
+def _ssh_env() -> dict[str, str]:
+    """Environment for every ssh child (including `ssh -G` lookups, which can run `Match exec` commands from the
+    user's ssh_config): PATH/HOME (+ the agent socket if one exists), never provider secrets."""
+    return {k: v for k, v in os.environ.items() if k in ("PATH", "HOME", "USER", "LANG", "SSH_AUTH_SOCK")}
+
+
 def _ssh_target(host: str) -> tuple[str, int]:
     """(hostname, port) as ssh itself resolves the alias (ssh -G reads ~/.ssh/config); cached until that file
     changes (e.g. the Mac's Tailscale IP moves)."""
@@ -116,7 +122,7 @@ def _ssh_target(host: str) -> tuple[str, int]:
         hostname, port, ok = host, 22, False
         with contextlib.suppress(Exception):
             out = subprocess.run(["ssh", "-G", "--", host], capture_output=True, text=True, timeout=5,
-                                 stdin=subprocess.DEVNULL).stdout
+                                 stdin=subprocess.DEVNULL, env=_ssh_env()).stdout
             kv = dict(line.split(" ", 1) for line in out.splitlines() if " " in line)
             hostname, port, ok = kv.get("hostname", host), int(kv.get("port", "22")), "hostname" in kv
         if not ok:  # don't cache a failed lookup
@@ -235,8 +241,7 @@ def _build_session_cls():
 
         @staticmethod
         def _child_env() -> dict[str, str]:
-            # ssh only needs PATH/HOME (+ the agent socket if one exists); never hand it provider secrets.
-            return {k: v for k, v in os.environ.items() if k in ("PATH", "HOME", "USER", "LANG", "SSH_AUTH_SOCK")}
+            return _ssh_env()
 
         async def _lifecycle_coro(self) -> None:
             """Mirror of the base lifecycle (phases, ready/setup-error signalling, re-entrant teardown) with the

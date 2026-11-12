@@ -1,5 +1,5 @@
 name: hermes-remote-hands
-version: "0.5.2"
+version: "0.5.3"
 description: >-
   One Hermes brain on a server, hands on your own Mac. Over plain OpenSSH (e.g. on your tailnet), with no agent,
   memory or model on the Mac:

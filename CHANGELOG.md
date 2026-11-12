@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.5.3 — 2026-11-12
+- Bypass guard: the control-socket check (`ssh … -S <socket>` / `ControlPath`) is now linear time. The old
+  `\bssh\b.*(…)` regex grew with the square of the number of `ssh` words, so one large argument (e.g. a
+  200 KB `write_file` of indented `ssh host x` lines, ~45 s) froze the whole process while the hook ran. Same matches as before, with
+  no length window that padding could get around. New offline test.
+- Bypass guard: the marker match and quote/`$var` stripping use plain string scans instead of regexes that were
+  tried at every position. Same results (fuzz-tested against the old regexes); a 2 MB argument now costs under
+  1 s instead of up to 3.6 s.
+- Bypass guard: line breaks, tabs and other escaped characters in the arguments now count as word separators. Before,
+  the JSON escape `\n` glued onto the next word once backslashes were stripped (`\nssh` → `nssh`), so a
+  control-socket `ssh` or the Mac's alias at the start of a line was missed. New offline test.
+- `ssh -G` lookups (alias → IP, key names) now run with the same minimal environment as every other ssh child,
+  so a `Match exec` in ssh_config never sees provider keys. New offline test.
+
 ## 0.5.2 — 2026-11-11
 - Tools appear only once both `ssh_host` and `home` are set (as documented).
 - Bypass guard: plain-language prompts; touching the plugin's own code now also says that running it connects to
