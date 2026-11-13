@@ -1,5 +1,7 @@
 # Hermes Remote Hands
 
+![Hermes Remote Hands: one brain on the server, hands on your Mac](assets/cover.png)
+
 **One Hermes brain on a server. Hands on your own Mac.**
 
 Run Hermes Agent on an always-on server (a VPS, a home box, a cloud VM) and let it work on the Mac in front of you:
@@ -111,7 +113,7 @@ panel; otherwise macOS answers "Operation not permitted". Keeping code in e.g. `
 ```bash
 ssh-keygen -t ed25519 -N "" -C hermes-remote-hands -f ~/.ssh/hermes_remote_hands
 cat >> ~/.ssh/config <<'EOF'
-Host macbook
+Host mbp-hermes
   HostName 100.x.y.z            # the Mac's Tailscale IP
   User you                      # your Mac username: run whoami on the Mac
   IdentityFile ~/.ssh/hermes_remote_hands
@@ -121,6 +123,10 @@ ssh-keyscan -t ed25519 100.x.y.z >> ~/.ssh/known_hosts
 ssh-keygen -lf ~/.ssh/known_hosts | tail -1    # compare with: ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub (on the Mac)
 cat ~/.ssh/hermes_remote_hands.pub              # copy this line for step 4
 ```
+
+Pick an alias you won't write in normal text (`mbp-hermes`, not `macbook`): the bypass guard asks for approval
+on any tool call that mentions the alias, so a common word turns every "MacBook" in a prompt or note into an
+approval card.
 
 **4. On the Mac: authorize the key.** Open `~/.ssh/authorized_keys` in a text editor (if the folder is missing,
 run `mkdir -m 700 ~/.ssh` first) and add the public key as one new line, prefixed with options that restrict it
@@ -142,7 +148,7 @@ EOF
 sudo sshd -t && echo OK
 ```
 
-Check from the server: `ssh macbook 'echo ok; sw_vers -productVersion'`.
+Check from the server: `ssh mbp-hermes 'echo ok; sw_vers -productVersion'`.
 
 **5. On the Mac: screen control (optional).** Install cua-driver, grant permissions **at the Mac itself** (the
 prompts don't work over SSH), turn its telemetry off, and let launchd own the daemon. The installer fetches the
@@ -178,7 +184,7 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.trycua.cua-driver.pl
 ```bash
 hermes plugins install hermes-remote-hands --enable
 S=plugins.entries.hermes-remote-hands.settings
-hermes config set $S.ssh_host macbook
+hermes config set $S.ssh_host mbp-hermes
 hermes config set $S.home /Users/you              # run echo $HOME on the Mac
 hermes config set $S.projects_dir '~/Code'        # quote the ~ so the SERVER's shell doesn't expand it
 hermes gateway restart                            # or start a new CLI session
@@ -220,7 +226,7 @@ approved one exact text at a time.
 |---|---|
 | `Host key verification failed` | Re-run the `ssh-keyscan` line from step 3 (after Remote Login is on), and compare fingerprints. |
 | `is not reachable over SSH — asleep, lid closed …` | Wake the Mac; check `tailscale status` on both machines and that Remote Login is on. |
-| `ssh failed: … Permission denied (publickey)` | The key line on the Mac is wrong, or its `from="…"` IP isn't the server's Tailscale IP (`tailscale ip -4` on the server). Test with `ssh macbook true`. |
+| `ssh failed: … Permission denied (publickey)` | The key line on the Mac is wrong, or its `from="…"` IP isn't the server's Tailscale IP (`tailscale ip -4` on the server). Test with `ssh mbp-hermes true`. |
 | `Operation not permitted` on `~/Documents/…` | Step 2: allow full disk access for remote users, or keep code outside the protected folders. |
 | Captures are empty / "locked" | Unlock the Mac; screen control needs your user logged in at the console. |
 | `Mac computer use unavailable: …` | Check cua-driver on the Mac: the `driver` setting's path and `cua-driver permissions status --json` (step 5). |

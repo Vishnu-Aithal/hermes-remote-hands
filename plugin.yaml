@@ -28,7 +28,7 @@ config_schema:
     label: "Mac SSH alias"
     default: ""
     required: true
-    description: "The Host alias for your Mac in the server's SSH config (e.g. macbook). It must log in with a key and no prompts: test with ssh <alias> true."
+    description: "The Host alias for your Mac in the server's SSH config (e.g. mbp-hermes; avoid everyday words like macbook, which the bypass guard would flag in ordinary text). It must log in with a key and no prompts: test with ssh <alias> true."
   home:
     type: str
     label: "Home folder on the Mac"
